@@ -256,12 +256,13 @@ def main():
                                    unsafe_allow_html=True)
                         
                         bartlett_test, kmo_test = app.calculate_adequacy_tests()
+                        chi_square, p_value = bartlett_test
+                        kmo_all, kmo_model = kmo_test
                         
                         col1, col2 = st.columns(2)
                         
                         with col1:
                             st.markdown("**Тест Барлетта**")
-                            chi_square, p_value = bartlett_test
                             st.metric("Chi-square", f"{chi_square:.3f}")
                             st.metric("p-value", f"{p_value:.6f}")
                             if p_value < 0.05:
@@ -271,7 +272,6 @@ def main():
                         
                         with col2:
                             st.markdown("**KMO тест**")
-                            kmo_all, kmo_model = kmo_test
                             st.metric("KMO общий", f"{kmo_all:.3f}")
                             
                             if kmo_all >= 0.8:
