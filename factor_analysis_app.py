@@ -6,43 +6,52 @@ import seaborn as sns
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
-from factor_analyzer import FactorAnalyzer
-from factor_analyzer.factor_analyzer import calculate_bartlett_sphericity, calculate_kmo
+from factor_analyzer import FactorAnalyzer, calculate_bartlett_sphericity, calculate_kmo
+from factor_analyzer.rotator import Rotator
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import io
+import warnings
+warnings.filterwarnings('ignore')
 
-# Настройка страницы
+# Конфигурация страницы
 st.set_page_config(
-    page_title="Факторный анализ - Аналог SPSS",
+    page_title="Факторный анализ",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# CSS стили
+# Стили CSS
 st.markdown("""
 <style>
-    .main-header {
-        font-size: 2.5rem;
-        color: #1f77b4;
-        text-align: center;
-        margin-bottom: 2rem;
+    .metric-container {
+        background-color: #f0f2f6;
+        padding: 10px;
+        border-radius: 10px;
+        margin: 5px 0;
     }
-    .section-header {
-        font-size: 1.5rem;
-        color: #2c3e50;
-        border-bottom: 2px solid #3498db;
-        padding-bottom: 0.5rem;
-        margin-top: 2rem;
+    .success-box {
+        background-color: #d4edda;
+        border: 1px solid #c3e6cb;
+        border-radius: 5px;
+        padding: 10px;
+        margin: 10px 0;
     }
-    .metric-card {
-        background-color: #f8f9fa;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        border-left: 4px solid #3498db;
-        margin: 0.5rem 0;
+    .warning-box {
+        background-color: #fff3cd;
+        border: 1px solid #ffeaa7;
+        border-radius: 5px;
+        padding: 10px;
+        margin: 10px 0;
+    }
+    .error-box {
+        background-color: #f8d7da;
+        border: 1px solid #f5c6cb;
+        border-radius: 5px;
+        padding: 10px;
+        margin: 10px 0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -50,496 +59,559 @@ st.markdown("""
 class FactorAnalysisApp:
     def __init__(self):
         self.data = None
-        self.processed_data = None
+        self.cleaned_data = None
+        self.factor_analyzer = None
+        self.pca_model = None
         self.scaler = StandardScaler()
-        self.imputer = SimpleImputer(strategy='mean')
         
-    def load_data(self, file):
+    def load_data(self, uploaded_file):
         """Загрузка данных из файла"""
         try:
-            if file.name.endswith('.csv'):
-                self.data = pd.read_csv(file)
-            elif file.name.endswith(('.xlsx', '.xls')):
-                self.data = pd.read_excel(file)
+            if uploaded_file.name.endswith('.csv'):
+                self.data = pd.read_csv(uploaded_file)
+            elif uploaded_file.name.endswith(('.xlsx', '.xls')):
+                self.data = pd.read_excel(uploaded_file)
             else:
-                st.error("Поддерживаются только форматы CSV и Excel")
+                st.error("Поддерживаются только файлы CSV и Excel")
                 return False
             return True
         except Exception as e:
-            st.error(f"Ошибка загрузки файла: {str(e)}")
+            st.error(f"Ошибка при загрузке файла: {str(e)}")
             return False
     
-    def preprocess_data(self, handle_missing='mean', normalize=True, selected_columns=None):
-        """Предобработка данных"""
-        if self.data is None:
+    def clean_data(self, columns_to_use, missing_strategy='mean', normalize=True):
+        """Очистка и предобработка данных"""
+        try:
+            # Выбираем только числовые колонки
+            numeric_data = self.data[columns_to_use].select_dtypes(include=[np.number])
+            
+            if numeric_data.empty:
+                st.error("Выбранные колонки не содержат числовых данных")
+                return False
+            
+            # Обработка пропусков
+            if missing_strategy == 'mean':
+                imputer = SimpleImputer(strategy='mean')
+            elif missing_strategy == 'median':
+                imputer = SimpleImputer(strategy='median')
+            elif missing_strategy == 'drop':
+                numeric_data = numeric_data.dropna()
+                if normalize:
+                    numeric_data = pd.DataFrame(
+                        self.scaler.fit_transform(numeric_data),
+                        columns=numeric_data.columns,
+                        index=numeric_data.index
+                    )
+                self.cleaned_data = numeric_data
+                return True
+            
+            imputed_data = imputer.fit_transform(numeric_data)
+            
+            # Нормализация
+            if normalize:
+                scaled_data = self.scaler.fit_transform(imputed_data)
+                self.cleaned_data = pd.DataFrame(
+                    scaled_data, 
+                    columns=numeric_data.columns,
+                    index=numeric_data.index
+                )
+            else:
+                self.cleaned_data = pd.DataFrame(
+                    imputed_data,
+                    columns=numeric_data.columns,
+                    index=numeric_data.index
+                )
+            
+            return True
+        except Exception as e:
+            st.error(f"Ошибка при очистке данных: {str(e)}")
             return False
-        
-        # Выбор колонок
-        if selected_columns:
-            numeric_data = self.data[selected_columns]
-        else:
-            numeric_data = self.data.select_dtypes(include=[np.number])
-        
-        if numeric_data.empty:
-            st.error("Не найдено числовых колонок для анализа")
-            return False
-        
-        # Обработка пропусков
-        if handle_missing == 'mean':
-            self.imputer.set_params(strategy='mean')
-        elif handle_missing == 'median':
-            self.imputer.set_params(strategy='median')
-        elif handle_missing == 'drop':
-            numeric_data = numeric_data.dropna()
-        
-        if handle_missing != 'drop':
-            numeric_data = pd.DataFrame(
-                self.imputer.fit_transform(numeric_data),
-                columns=numeric_data.columns
-            )
-        
-        # Нормализация
-        if normalize:
-            self.processed_data = pd.DataFrame(
-                self.scaler.fit_transform(numeric_data),
-                columns=numeric_data.columns
-            )
-        else:
-            self.processed_data = numeric_data
-        
-        return True
     
-    def calculate_correlation_matrix(self):
-        """Расчет корреляционной матрицы"""
-        if self.processed_data is None:
+    def check_factor_analysis_suitability(self):
+        """Проверка применимости факторного анализа"""
+        try:
+            # Тест Бартлетта
+            chi_square, p_value = calculate_bartlett_sphericity(self.cleaned_data)
+            
+            # Тест KMO
+            kmo_all, kmo_model = calculate_kmo(self.cleaned_data)
+            
+            return {
+                'bartlett_chi2': chi_square,
+                'bartlett_p': p_value,
+                'kmo_model': kmo_model,
+                'kmo_variables': kmo_all
+            }
+        except Exception as e:
+            st.error(f"Ошибка при проверке применимости: {str(e)}")
             return None
-        return self.processed_data.corr()
     
-    def perform_pca(self, n_components=None):
-        """Проведение PCA анализа"""
-        if self.processed_data is None:
-            return None, None
-        
-        if n_components is None:
-            n_components = min(self.processed_data.shape)
-        
-        pca = PCA(n_components=n_components)
-        pca_result = pca.fit_transform(self.processed_data)
-        
-        return pca, pca_result
+    def correlation_matrix(self):
+        """Построение матрицы корреляций"""
+        return self.cleaned_data.corr()
     
-    def perform_factor_analysis(self, n_factors, rotation='varimax'):
-        """Проведение факторного анализа"""
-        if self.processed_data is None:
+    def perform_pca(self):
+        """Выполнение анализа главных компонент"""
+        try:
+            self.pca_model = PCA()
+            self.pca_model.fit(self.cleaned_data)
+            return True
+        except Exception as e:
+            st.error(f"Ошибка при выполнении PCA: {str(e)}")
+            return False
+    
+    def perform_factor_analysis(self, n_factors, method='principal', rotation='varimax'):
+        """Выполнение факторного анализа"""
+        try:
+            if method == 'principal':
+                self.factor_analyzer = FactorAnalyzer(
+                    n_factors=n_factors,
+                    rotation=rotation,
+                    method='principal'
+                )
+            else:
+                self.factor_analyzer = FactorAnalyzer(
+                    n_factors=n_factors,
+                    rotation=rotation,
+                    method='ml'
+                )
+            
+            self.factor_analyzer.fit(self.cleaned_data)
+            return True
+        except Exception as e:
+            st.error(f"Ошибка при выполнении факторного анализа: {str(e)}")
+            return False
+    
+    def get_eigenvalues(self):
+        """Получение собственных значений"""
+        if self.pca_model is not None:
+            return self.pca_model.explained_variance_
+        return None
+    
+    def plot_scree(self):
+        """График Scree plot"""
+        if self.pca_model is None:
             return None
         
-        fa = FactorAnalyzer(n_factors=n_factors, rotation=rotation)
-        fa.fit(self.processed_data)
+        eigenvalues = self.pca_model.explained_variance_
+        components = range(1, len(eigenvalues) + 1)
         
-        return fa
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=list(components),
+            y=eigenvalues,
+            mode='lines+markers',
+            line=dict(width=2),
+            marker=dict(size=8),
+            name='Собственные значения'
+        ))
+        
+        # Линия критерия Кайзера (eigenvalue = 1)
+        fig.add_hline(y=1, line_dash="dash", line_color="red", 
+                     annotation_text="Критерий Кайзера (λ=1)")
+        
+        fig.update_layout(
+            title='Scree Plot - График собственных значений',
+            xaxis_title='Компонента',
+            yaxis_title='Собственное значение',
+            height=500,
+            showlegend=True
+        )
+        
+        return fig
     
-    def calculate_adequacy_tests(self):
-        """Расчет тестов адекватности (KMO и Барлетта)"""
-        if self.processed_data is None:
-            return None, None
+    def plot_factor_loadings(self):
+        """График факторных нагрузок"""
+        if self.factor_analyzer is None:
+            return None
         
-        # Тест Барлетта
-        chi_square, p_value = calculate_bartlett_sphericity(self.processed_data)
+        loadings = self.factor_analyzer.loadings_
+        variables = self.cleaned_data.columns
+        n_factors = loadings.shape[1]
         
-        # KMO тест
-        kmo_all, kmo_model = calculate_kmo(self.processed_data)
+        fig = go.Figure()
         
-        return (chi_square, p_value), (kmo_all, kmo_model)
+        for i in range(n_factors):
+            fig.add_trace(go.Bar(
+                name=f'Фактор {i+1}',
+                x=variables,
+                y=loadings[:, i],
+                opacity=0.8
+            ))
+        
+        fig.update_layout(
+            title='Факторные нагрузки',
+            xaxis_title='Переменные',
+            yaxis_title='Нагрузка',
+            height=500,
+            barmode='group'
+        )
+        
+        return fig
+    
+    def plot_biplot(self):
+        """Двумерный biplot"""
+        if self.factor_analyzer is None or self.factor_analyzer.loadings_.shape[1] < 2:
+            return None
+        
+        loadings = self.factor_analyzer.loadings_
+        scores = self.factor_analyzer.transform(self.cleaned_data)
+        variables = self.cleaned_data.columns
+        
+        fig = go.Figure()
+        
+        # Точки наблюдений
+        fig.add_trace(go.Scatter(
+            x=scores[:, 0],
+            y=scores[:, 1],
+            mode='markers',
+            marker=dict(size=6, opacity=0.6),
+            name='Наблюдения',
+            hovertemplate='Наблюдение: %{pointNumber}<br>' +
+                         'Фактор 1: %{x:.2f}<br>' +
+                         'Фактор 2: %{y:.2f}<extra></extra>'
+        ))
+        
+        # Векторы переменных
+        for i, var in enumerate(variables):
+            fig.add_trace(go.Scatter(
+                x=[0, loadings[i, 0] * 3],
+                y=[0, loadings[i, 1] * 3],
+                mode='lines+text',
+                line=dict(color='red', width=2),
+                text=['', var],
+                textposition='top center',
+                name=var,
+                showlegend=False,
+                hovertemplate=f'{var}<br>' +
+                             'Нагрузка Ф1: %{x:.3f}<br>' +
+                             'Нагрузка Ф2: %{y:.3f}<extra></extra>'
+            ))
+        
+        fig.update_layout(
+            title='Biplot - Двумерное представление факторов',
+            xaxis_title='Фактор 1',
+            yaxis_title='Фактор 2',
+            height=600,
+            showlegend=True
+        )
+        
+        return fig
 
 def main():
-    st.markdown('<h1 class="main-header">📊 Факторный анализ - Аналог SPSS Statistics</h1>', 
-                unsafe_allow_html=True)
+    st.title("📊 Факторный анализ - Аналог SPSS Statistics")
+    st.markdown("---")
     
-    app = FactorAnalysisApp()
+    # Инициализация приложения
+    if 'app' not in st.session_state:
+        st.session_state.app = FactorAnalysisApp()
+    
+    app = st.session_state.app
     
     # Боковая панель
-    st.sidebar.title("Настройки анализа")
+    with st.sidebar:
+        st.header("🎯 Цель анализа")
+        goal = st.text_area(
+            "Опишите цель вашего факторного анализа:",
+            placeholder="Например: выявление скрытых факторов в поведении пользователей",
+            height=100
+        )
+        
+        if goal:
+            st.success(f"Цель: {goal}")
     
-    # Загрузка данных
-    st.sidebar.markdown("### 📁 Загрузка данных")
-    uploaded_file = st.sidebar.file_uploader(
-        "Выберите файл (CSV или Excel)",
-        type=['csv', 'xlsx', 'xls'],
-        help="Загрузите файл с данными для анализа"
-    )
+    # Основное содержимое
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📁 Данные", 
+        "🧹 Подготовка", 
+        "🔍 Анализ применимости", 
+        "📈 Факторный анализ", 
+        "📊 Результаты"
+    ])
     
-    if uploaded_file is not None:
-        if app.load_data(uploaded_file):
-            st.success(f"✅ Файл успешно загружен: {uploaded_file.name}")
+    with tab1:
+        st.header("Импорт данных")
+        uploaded_file = st.file_uploader(
+            "Загрузите файл Excel или CSV",
+            type=['csv', 'xlsx', 'xls'],
+            help="Поддерживаются форматы: CSV, XLSX, XLS"
+        )
+        
+        if uploaded_file is not None:
+            if app.load_data(uploaded_file):
+                st.success("✅ Данные успешно загружены!")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Количество строк", app.data.shape[0])
+                with col2:
+                    st.metric("Количество столбцов", app.data.shape[1])
+                
+                st.subheader("Предварительный просмотр данных")
+                st.dataframe(app.data.head(10))
+                
+                st.subheader("Информация о данных")
+                buffer = io.StringIO()
+                app.data.info(buf=buffer)
+                st.text(buffer.getvalue())
+    
+    with tab2:
+        if app.data is not None:
+            st.header("Очистка и предобработка данных")
             
-            # Просмотр данных
-            st.markdown('<h2 class="section-header">📋 Просмотр данных</h2>', 
-                       unsafe_allow_html=True)
+            col1, col2 = st.columns(2)
             
-            col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("Количество строк", app.data.shape[0])
-            with col2:
-                st.metric("Количество столбцов", app.data.shape[1])
-            with col3:
-                numeric_cols = len(app.data.select_dtypes(include=[np.number]).columns)
-                st.metric("Числовых столбцов", numeric_cols)
-            
-            # Отображение первых строк
-            st.dataframe(app.data.head(), use_container_width=True)
-            
-            # Выбор колонок для анализа
-            st.sidebar.markdown("### 🎯 Выбор переменных")
-            numeric_columns = app.data.select_dtypes(include=[np.number]).columns.tolist()
-            
-            if numeric_columns:
-                selected_columns = st.sidebar.multiselect(
-                    "Выберите переменные для анализа",
+                st.subheader("Выбор переменных")
+                numeric_columns = app.data.select_dtypes(include=[np.number]).columns.tolist()
+                selected_columns = st.multiselect(
+                    "Выберите числовые переменные для анализа:",
                     numeric_columns,
-                    default=numeric_columns[:min(10, len(numeric_columns))],
-                    help="Выберите числовые переменные для факторного анализа"
+                    default=numeric_columns
+                )
+            
+            with col2:
+                st.subheader("Параметры очистки")
+                missing_strategy = st.selectbox(
+                    "Обработка пропусков:",
+                    ['mean', 'median', 'drop'],
+                    format_func=lambda x: {
+                        'mean': 'Заполнить средним',
+                        'median': 'Заполнить медианой',
+                        'drop': 'Удалить строки'
+                    }[x]
                 )
                 
+                normalize = st.checkbox("Нормализация данных", value=True)
+            
+            if st.button("🧹 Очистить данные"):
                 if selected_columns:
-                    # Настройки предобработки
-                    st.sidebar.markdown("### ⚙️ Предобработка данных")
-                    
-                    handle_missing = st.sidebar.selectbox(
-                        "Обработка пропусков",
-                        ['mean', 'median', 'drop'],
-                        format_func=lambda x: {
-                            'mean': 'Заменить средним',
-                            'median': 'Заменить медианой',
-                            'drop': 'Удалить строки'
-                        }[x]
-                    )
-                    
-                    normalize_data = st.sidebar.checkbox(
-                        "Стандартизировать данные", 
-                        value=True,
-                        help="Рекомендуется для факторного анализа"
-                    )
-                    
-                    # Предобработка данных
-                    if app.preprocess_data(handle_missing, normalize_data, selected_columns):
+                    if app.clean_data(selected_columns, missing_strategy, normalize):
+                        st.success("✅ Данные успешно очищены!")
                         
-                        # Описательная статистика
-                        st.markdown('<h2 class="section-header">📈 Описательная статистика</h2>', 
-                                   unsafe_allow_html=True)
-                        st.dataframe(app.processed_data.describe(), use_container_width=True)
-                        
-                        # Информация о пропусках
-                        missing_info = app.data[selected_columns].isnull().sum()
-                        if missing_info.sum() > 0:
-                            st.warning(f"⚠️ Обнаружено {missing_info.sum()} пропущенных значений")
-                            st.dataframe(missing_info[missing_info > 0], use_container_width=True)
-                        
-                        # Корреляционная матрица
-                        st.markdown('<h2 class="section-header">🔗 Корреляционная матрица</h2>', 
-                                   unsafe_allow_html=True)
-                        
-                        corr_matrix = app.calculate_correlation_matrix()
-                        
-                        # Тепловая карта корреляций
-                        fig_corr = px.imshow(
-                            corr_matrix,
-                            text_auto=True,
-                            aspect="auto",
-                            color_continuous_scale='RdBu_r',
-                            title="Корреляционная матрица"
-                        )
-                        fig_corr.update_traces(texttemplate="%{z:.2f}", textfont_size=10)
-                        st.plotly_chart(fig_corr, use_container_width=True)
-                        
-                        # Тесты адекватности
-                        st.markdown('<h2 class="section-header">✅ Тесты адекватности</h2>', 
-                                   unsafe_allow_html=True)
-                        
-                        bartlett_test, kmo_test = app.calculate_adequacy_tests()
-                        chi_square, p_value = bartlett_test
-                        kmo_all, kmo_model = kmo_test
-                        
-                        col1, col2 = st.columns(2)
-                        
+                        col1, col2, col3 = st.columns(3)
                         with col1:
-                            st.markdown("**Тест Барлетта**")
-                            st.metric("Chi-square", f"{chi_square:.3f}")
-                            st.metric("p-value", f"{p_value:.6f}")
-                            if p_value < 0.05:
-                                st.success("✅ Данные подходят для факторного анализа")
-                            else:
-                                st.warning("⚠️ Данные могут не подходить для факторного анализа")
-                        
+                            st.metric("Финальные строки", app.cleaned_data.shape[0])
                         with col2:
-                            st.markdown("**KMO тест**")
-                            if kmo_all is not None:
-                                st.metric("KMO общий", f"{kmo_all:.3f}")
-                                
-                                if kmo_all >= 0.8:
-                                    st.success("✅ Превосходно")
-                                elif kmo_all >= 0.7:
-                                    st.success("✅ Хорошо")
-                                elif kmo_all >= 0.6:
-                                    st.warning("⚠️ Удовлетворительно")
-                                else:
-                                    st.error("❌ Неудовлетворительно")
+                            st.metric("Финальные столбцы", app.cleaned_data.shape[1])
+                        with col3:
+                            st.metric("Пропуски", app.cleaned_data.isnull().sum().sum())
                         
-                        # Настройки анализа
-                        st.sidebar.markdown("### 🎛️ Настройки факторного анализа")
+                        st.subheader("Очищенные данные")
+                        st.dataframe(app.cleaned_data.head())
                         
-                        analysis_type = st.sidebar.selectbox(
-                            "Тип анализа",
-                            ['PCA', 'Factor Analysis'],
-                            help="PCA - анализ главных компонент, Factor Analysis - факторный анализ"
-                        )
-                        
-                        if analysis_type == 'PCA':
-                            # PCA анализ
-                            st.markdown('<h2 class="section-header">🔍 Анализ главных компонент (PCA)</h2>', 
-                                       unsafe_allow_html=True)
-                            
-                            pca, pca_result = app.perform_pca()
-                            
-                            if pca is not None:
-                                # Scree plot
-                                fig_scree = go.Figure()
-                                fig_scree.add_trace(go.Scatter(
-                                    x=list(range(1, len(pca.explained_variance_ratio_) + 1)),
-                                    y=pca.explained_variance_ratio_,
-                                    mode='lines+markers',
-                                    name='Собственные значения',
-                                    line=dict(width=3),
-                                    marker=dict(size=8)
-                                ))
-                                fig_scree.update_layout(
-                                    title="Scree Plot - График осыпи",
-                                    xaxis_title="Компонент",
-                                    yaxis_title="Доля объясненной дисперсии",
-                                    hovermode='x'
-                                )
-                                st.plotly_chart(fig_scree, use_container_width=True)
-                                
-                                # Кумулятивная дисперсия
-                                cumsum_var = np.cumsum(pca.explained_variance_ratio_)
-                                fig_cum = go.Figure()
-                                fig_cum.add_trace(go.Scatter(
-                                    x=list(range(1, len(cumsum_var) + 1)),
-                                    y=cumsum_var,
-                                    mode='lines+markers',
-                                    name='Кумулятивная дисперсия',
-                                    line=dict(width=3),
-                                    marker=dict(size=8)
-                                ))
-                                fig_cum.add_hline(y=0.8, line_dash="dash", 
-                                                 annotation_text="80% дисперсии")
-                                fig_cum.update_layout(
-                                    title="Кумулятивная объясненная дисперсия",
-                                    xaxis_title="Количество компонент",
-                                    yaxis_title="Кумулятивная доля дисперсии"
-                                )
-                                st.plotly_chart(fig_cum, use_container_width=True)
-                                
-                                # Компоненты для анализа
-                                n_components_80 = np.argmax(cumsum_var >= 0.8) + 1
-                                st.info(f"💡 Для объяснения 80% дисперсии требуется {n_components_80} компонент")
-                                
-                                # Нагрузки компонент
-                                components_df = pd.DataFrame(
-                                    pca.components_[:5].T,  # Показываем первые 5 компонент
-                                    columns=[f'PC{i+1}' for i in range(min(5, pca.n_components_))],
-                                    index=selected_columns
-                                )
-                                
-                                st.markdown("**Нагрузки главных компонент**")
-                                st.dataframe(components_df.round(3), use_container_width=True)
-                                
-                                # Biplot
-                                if len(selected_columns) <= 20:  # Для читаемости
-                                    fig_biplot = go.Figure()
-                                    
-                                    # Точки наблюдений
-                                    fig_biplot.add_trace(go.Scatter(
-                                        x=pca_result[:, 0],
-                                        y=pca_result[:, 1],
-                                        mode='markers',
-                                        name='Наблюдения',
-                                        marker=dict(size=5, opacity=0.6),
-                                        showlegend=True
-                                    ))
-                                    
-                                    # Векторы переменных
-                                    for i, var in enumerate(selected_columns):
-                                        fig_biplot.add_trace(go.Scatter(
-                                            x=[0, pca.components_[0, i] * 3],
-                                            y=[0, pca.components_[1, i] * 3],
-                                            mode='lines+text',
-                                            name=var,
-                                            text=['', var],
-                                            textposition='top center',
-                                            line=dict(width=2),
-                                            showlegend=False
-                                        ))
-                                    
-                                    fig_biplot.update_layout(
-                                        title="Biplot - Первые две главные компоненты",
-                                        xaxis_title=f"PC1 ({pca.explained_variance_ratio_[0]:.1%} дисперсии)",
-                                        yaxis_title=f"PC2 ({pca.explained_variance_ratio_[1]:.1%} дисперсии)"
-                                    )
-                                    st.plotly_chart(fig_biplot, use_container_width=True)
-                        
-                        else:
-                            # Факторный анализ
-                            st.markdown('<h2 class="section-header">🔬 Факторный анализ</h2>', 
-                                       unsafe_allow_html=True)
-                            
-                            n_factors = st.sidebar.slider(
-                                "Количество факторов",
-                                min_value=1,
-                                max_value=min(10, len(selected_columns)-1),
-                                value=min(3, len(selected_columns)-1),
-                                help="Выберите количество факторов для извлечения"
-                            )
-                            
-                            rotation = st.sidebar.selectbox(
-                                "Тип вращения",
-                                ['varimax', 'promax', 'oblimin', 'oblimax', 'quartimin'],
-                                help="Varimax - ортогональное вращение (рекомендуется)"
-                            )
-                            
-                            fa = app.perform_factor_analysis(n_factors, rotation)
-                            
-                            if fa is not None:
-                                # Факторные нагрузки
-                                loadings_df = pd.DataFrame(
-                                    fa.loadings_,
-                                    columns=[f'Фактор {i+1}' for i in range(n_factors)],
-                                    index=selected_columns
-                                )
-                                
-                                st.markdown("**Матрица факторных нагрузок**")
-                                st.dataframe(loadings_df.round(3), use_container_width=True)
-                                
-                                # Тепловая карта нагрузок
-                                fig_loadings = px.imshow(
-                                    loadings_df.T,
-                                    text_auto=True,
-                                    aspect="auto",
-                                    color_continuous_scale='RdBu_r',
-                                    title="Матрица факторных нагрузок"
-                                )
-                                fig_loadings.update_traces(texttemplate="%{z:.2f}", textfont_size=10)
-                                st.plotly_chart(fig_loadings, use_container_width=True)
-                                
-                                # Коммунальности
-                                communalities = pd.DataFrame({
-                                    'Переменная': selected_columns,
-                                    'Коммунальность': fa.get_communalities()
-                                })
-                                
-                                st.markdown("**Коммунальности переменных**")
-                                st.dataframe(communalities.round(3), use_container_width=True)
-                                
-                                # Собственные значения
-                                eigenvalues = fa.get_eigenvalues()[0]
-                                
-                                col1, col2 = st.columns(2)
-                                with col1:
-                                    st.markdown("**Собственные значения факторов**")
-                                    eigenvals_df = pd.DataFrame({
-                                        'Фактор': [f'Фактор {i+1}' for i in range(len(eigenvalues))],
-                                        'Собственное значение': eigenvalues,
-                                        'Доля дисперсии': eigenvalues / len(selected_columns)
-                                    })
-                                    st.dataframe(eigenvals_df.round(3), use_container_width=True)
-                                
-                                with col2:
-                                    # График собственных значений
-                                    fig_eigen = go.Figure()
-                                    fig_eigen.add_trace(go.Bar(
-                                        x=[f'F{i+1}' for i in range(len(eigenvalues))],
-                                        y=eigenvalues,
-                                        name='Собственные значения'
-                                    ))
-                                    fig_eigen.add_hline(y=1, line_dash="dash", 
-                                                       annotation_text="Критерий Кайзера")
-                                    fig_eigen.update_layout(
-                                        title="Собственные значения факторов",
-                                        xaxis_title="Фактор",
-                                        yaxis_title="Собственное значение"
-                                    )
-                                    st.plotly_chart(fig_eigen, use_container_width=True)
-                        
-                        # Экспорт результатов
-                        st.markdown('<h2 class="section-header">💾 Экспорт результатов</h2>', 
-                                   unsafe_allow_html=True)
-                        
-                        if st.button("Скачать результаты анализа"):
-                            # Создание Excel файла с результатами
-                            output = io.BytesIO()
-                            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                                # Исходные данные
-                                app.data.to_excel(writer, sheet_name='Исходные данные', index=False)
-                                
-                                # Обработанные данные
-                                app.processed_data.to_excel(writer, sheet_name='Обработанные данные', index=False)
-                                
-                                # Корреляционная матрица
-                                corr_matrix.to_excel(writer, sheet_name='Корреляции')
-                                
-                                if analysis_type == 'PCA' and pca is not None:
-                                    # PCA результаты
-                                    components_df.to_excel(writer, sheet_name='PCA нагрузки')
-                                    
-                                    # Объясненная дисперсия
-                                    var_df = pd.DataFrame({
-                                        'Компонент': [f'PC{i+1}' for i in range(len(pca.explained_variance_ratio_))],
-                                        'Дисперсия': pca.explained_variance_ratio_,
-                                        'Кумулятивная': np.cumsum(pca.explained_variance_ratio_)
-                                    })
-                                    var_df.to_excel(writer, sheet_name='PCA дисперсия', index=False)
-                                
-                                elif analysis_type == 'Factor Analysis' and fa is not None:
-                                    # Факторный анализ результаты
-                                    loadings_df.to_excel(writer, sheet_name='Факторные нагрузки')
-                                    communalities.to_excel(writer, sheet_name='Коммунальности', index=False)
-                                    eigenvals_df.to_excel(writer, sheet_name='Собственные значения', index=False)
-                            
-                            st.download_button(
-                                label="📥 Скачать Excel файл с результатами",
-                                data=output.getvalue(),
-                                file_name=f"factor_analysis_results_{analysis_type.lower()}.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                            )
-                
+                        st.subheader("Статистика")
+                        st.dataframe(app.cleaned_data.describe())
                 else:
-                    st.warning("⚠️ Выберите хотя бы одну переменную для анализа")
-            else:
-                st.error("❌ В файле не найдено числовых столбцов для анализа")
+                    st.warning("Выберите хотя бы одну переменную")
+        else:
+            st.warning("Сначала загрузите данные в разделе 'Данные'")
     
-    else:
-        st.info("👆 Загрузите файл с данными для начала анализа")
-        
-        # Пример использования
-        st.markdown('<h2 class="section-header">📖 Инструкция по использованию</h2>', 
-                   unsafe_allow_html=True)
-        
-        st.markdown("""
-        ### Как использовать программу:
-        
-        1. **Загрузите данные**: Выберите CSV или Excel файл с вашими данными
-        2. **Выберите переменные**: Отметьте числовые переменные для анализа
-        3. **Настройте предобработку**: Выберите способ обработки пропусков и нормализации
-        4. **Проверьте адекватность**: Оцените результаты тестов Барлетта и KMO
-        5. **Выберите тип анализа**: PCA или факторный анализ
-        6. **Интерпретируйте результаты**: Изучите графики и таблицы
-        7. **Экспортируйте результаты**: Скачайте Excel файл с результатами
-        
-        ### Рекомендации:
-        - **KMO > 0.7** - данные подходят для факторного анализа
-        - **p-value теста Барлетта < 0.05** - корреляции между переменными значимы
-        - **Собственные значения > 1** - критерий Кайзера для выбора количества факторов
-        - **80% дисперсии** - рекомендуемый порог для PCA
-        """)
+    with tab3:
+        if app.cleaned_data is not None:
+            st.header("Проверка применимости факторного анализа")
+            
+            if st.button("🔍 Проверить применимость"):
+                suitability = app.check_factor_analysis_suitability()
+                
+                if suitability:
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.subheader("Тест Бартлетта на сферичность")
+                        st.metric("χ² статистика", f"{suitability['bartlett_chi2']:.2f}")
+                        st.metric("p-значение", f"{suitability['bartlett_p']:.2e}")
+                        
+                        if suitability['bartlett_p'] < 0.05:
+                            st.markdown('<div class="success-box">✅ Тест Бартлетта: данные подходят для факторного анализа (p < 0.05)</div>', unsafe_allow_html=True)
+                        else:
+                            st.markdown('<div class="error-box">❌ Тест Бартлетта: данные НЕ подходят для факторного анализа (p ≥ 0.05)</div>', unsafe_allow_html=True)
+                    
+                    with col2:
+                        st.subheader("Тест KMO (Kaiser-Meyer-Olkin)")
+                        st.metric("KMO общий", f"{suitability['kmo_model']:.3f}")
+                        
+                        if suitability['kmo_model'] >= 0.8:
+                            kmo_text = "Отличная применимость"
+                            kmo_class = "success-box"
+                        elif suitability['kmo_model'] >= 0.7:
+                            kmo_text = "Хорошая применимость"
+                            kmo_class = "success-box"
+                        elif suitability['kmo_model'] >= 0.6:
+                            kmo_text = "Средняя применимость"
+                            kmo_class = "warning-box"
+                        elif suitability['kmo_model'] >= 0.5:
+                            kmo_text = "Слабая применимость"
+                            kmo_class = "warning-box"
+                        else:
+                            kmo_text = "Неприменимо"
+                            kmo_class = "error-box"
+                        
+                        st.markdown(f'<div class="{kmo_class}">KMO: {kmo_text}</div>', unsafe_allow_html=True)
+                    
+                    st.subheader("Матрица корреляций")
+                    corr_matrix = app.correlation_matrix()
+                    
+                    fig, ax = plt.subplots(figsize=(10, 8))
+                    sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', center=0, ax=ax)
+                    plt.title('Матрица корреляций')
+                    st.pyplot(fig)
+                    plt.close()
+        else:
+            st.warning("Сначала очистите данные в разделе 'Подготовка'")
+    
+    with tab4:
+        if app.cleaned_data is not None:
+            st.header("Факторный анализ")
+            
+            # Выполнение PCA для определения количества факторов
+            if st.button("📊 Выполнить предварительный анализ (PCA)"):
+                if app.perform_pca():
+                    st.success("✅ PCA выполнен успешно!")
+                    
+                    # Scree plot
+                    scree_fig = app.plot_scree()
+                    if scree_fig:
+                        st.plotly_chart(scree_fig, use_container_width=True)
+                    
+                    # Таблица собственных значений
+                    eigenvalues = app.get_eigenvalues()
+                    explained_variance = app.pca_model.explained_variance_ratio_
+                    cumulative_variance = np.cumsum(explained_variance)
+                    
+                    results_df = pd.DataFrame({
+                        'Компонента': range(1, len(eigenvalues) + 1),
+                        'Собственное значение': eigenvalues,
+                        'Объясненная дисперсия (%)': explained_variance * 100,
+                        'Кумулятивная дисперсия (%)': cumulative_variance * 100
+                    })
+                    
+                    st.subheader("Собственные значения и объясненная дисперсия")
+                    st.dataframe(results_df)
+                    
+                    # Рекомендация по количеству факторов
+                    kaiser_factors = np.sum(eigenvalues > 1)
+                    st.info(f"🎯 Рекомендуемое количество факторов по критерию Кайзера: {kaiser_factors}")
+            
+            st.markdown("---")
+            
+            # Настройки факторного анализа
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                n_factors = st.number_input(
+                    "Количество факторов:",
+                    min_value=1,
+                    max_value=min(10, app.cleaned_data.shape[1]-1) if app.cleaned_data is not None else 5,
+                    value=3
+                )
+            
+            with col2:
+                method = st.selectbox(
+                    "Метод извлечения:",
+                    ['principal', 'ml'],
+                    format_func=lambda x: {
+                        'principal': 'Главные компоненты (PCA)',
+                        'ml': 'Максимальное правдоподобие'
+                    }[x]
+                )
+            
+            with col3:
+                rotation = st.selectbox(
+                    "Метод вращения:",
+                    ['varimax', 'oblimin', 'quartimax'],
+                    format_func=lambda x: {
+                        'varimax': 'Varimax (ортогональное)',
+                        'oblimin': 'Oblimin (наклонное)',
+                        'quartimax': 'Quartimax (ортогональное)'
+                    }[x]
+                )
+            
+            if st.button("🎯 Выполнить факторный анализ"):
+                if app.perform_factor_analysis(n_factors, method, rotation):
+                    st.success("✅ Факторный анализ выполнен успешно!")
+                    
+                    # Факторные нагрузки
+                    loadings_fig = app.plot_factor_loadings()
+                    if loadings_fig:
+                        st.plotly_chart(loadings_fig, use_container_width=True)
+                    
+                    # Biplot
+                    if n_factors >= 2:
+                        biplot_fig = app.plot_biplot()
+                        if biplot_fig:
+                            st.plotly_chart(biplot_fig, use_container_width=True)
+        else:
+            st.warning("Сначала очистите данные в разделе 'Подготовка'")
+    
+    with tab5:
+        if app.factor_analyzer is not None:
+            st.header("Результаты и интерпретация")
+            
+            # Матрица факторных нагрузок
+            st.subheader("Матрица факторных нагрузок")
+            loadings_df = pd.DataFrame(
+                app.factor_analyzer.loadings_,
+                columns=[f'Фактор {i+1}' for i in range(app.factor_analyzer.loadings_.shape[1])],
+                index=app.cleaned_data.columns
+            )
+            st.dataframe(loadings_df.round(3))
+            
+            # Объясненная дисперсия
+            st.subheader("Объясненная дисперсия")
+            if hasattr(app.factor_analyzer, 'get_factor_variance'):
+                variance_info = app.factor_analyzer.get_factor_variance()
+                variance_df = pd.DataFrame({
+                    'Фактор': [f'Фактор {i+1}' for i in range(len(variance_info[0]))],
+                    'Собственное значение': variance_info[0],
+                    'Дисперсия (%)': variance_info[1] * 100,
+                    'Кумулятивная дисперсия (%)': np.cumsum(variance_info[1]) * 100
+                })
+                st.dataframe(variance_df.round(3))
+                
+                total_variance = np.sum(variance_info[1]) * 100
+                st.metric("Общая объясненная дисперсия", f"{total_variance:.1f}%")
+            
+            # Интерпретация факторов
+            st.subheader("Интерпретация факторов")
+            st.info("""
+            **Рекомендации по интерпретации:**
+            - Нагрузки > 0.7 считаются высокими
+            - Нагрузки 0.4-0.7 считаются умеренными  
+            - Нагрузки < 0.4 считаются низкими
+            
+            Для каждого фактора найдите переменные с наивысшими нагрузками 
+            и дайте содержательную интерпретацию фактора.
+            """)
+            
+            # Применение результатов
+            st.subheader("Факторные оценки")
+            if st.button("Рассчитать факторные оценки"):
+                factor_scores = app.factor_analyzer.transform(app.cleaned_data)
+                scores_df = pd.DataFrame(
+                    factor_scores,
+                    columns=[f'Фактор {i+1}' for i in range(factor_scores.shape[1])]
+                )
+                st.dataframe(scores_df.head(10))
+                
+                # Возможность скачать результаты
+                csv = scores_df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Скачать факторные оценки (CSV)",
+                    data=csv,
+                    file_name="factor_scores.csv",
+                    mime="text/csv"
+                )
+        else:
+            st.warning("Сначала выполните факторный анализ в разделе 'Факторный анализ'")
+    
+    # Футер
+    st.markdown("---")
+    st.markdown("""
+    <div style='text-align: center; color: #666;'>
+        <p>📊 Факторный анализ - Аналог SPSS Statistics | Разработано на Python + Streamlit</p>
+    </div>
+    """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
