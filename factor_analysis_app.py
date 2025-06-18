@@ -68,7 +68,11 @@ class FactorAnalysisApp:
         """Загрузка данных из файла"""
         try:
             if uploaded_file.name.endswith('.csv'):
-                self.data = pd.read_csv(uploaded_file)
+                try:
+                    self.data = pd.read_csv(uploaded_file, encoding='utf-8')
+                except UnicodeDecodeError:
+                    uploaded_file.seek(0)
+                    self.data = pd.read_csv(uploaded_file, encoding='cp1251')
             elif uploaded_file.name.endswith(('.xlsx', '.xls')):
                 self.data = pd.read_excel(uploaded_file)
             else:
