@@ -70,11 +70,14 @@ class FactorAnalysisApp:
             if uploaded_file.name.endswith('.csv'):
                 try:
                     self.data = pd.read_csv(uploaded_file, encoding='utf-8')
+                    st.write("Обнаружены столбцы:", self.data.columns.tolist())
                 except UnicodeDecodeError:
                     uploaded_file.seek(0)
                     self.data = pd.read_csv(uploaded_file, encoding='cp1251')
+                    st.write("Обнаружены столбцы:", self.data.columns.tolist())
             elif uploaded_file.name.endswith(('.xlsx', '.xls')):
                 self.data = pd.read_excel(uploaded_file)
+                st.write("Обнаружены столбцы:", self.data.columns.tolist())
             else:
                 st.error("Поддерживаются только файлы CSV и Excel")
                 return False
