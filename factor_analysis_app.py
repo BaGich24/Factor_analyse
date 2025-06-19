@@ -73,6 +73,12 @@ class FactorAnalysisApp:
                 except UnicodeDecodeError:
                     uploaded_file.seek(0)
                     self.data = pd.read_csv(uploaded_file, encoding='cp1251')
+                if len(self.data.columns) == 1:
+                    uploaded_file.seek(0)
+                    self.data = pd.read_csv(uploaded_file, encoding='utf-8', sep=';')
+                    if len(self.data.columns) == 1:
+                        uploaded_file.seek(0)
+                        self.data = pd.read_csv(uploaded_file, encoding='cp1251', sep=';')
             elif uploaded_file.name.endswith(('.xlsx', '.xls')):
                 self.data = pd.read_excel(uploaded_file)
             else:
